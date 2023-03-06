@@ -1,0 +1,409 @@
+---
+title: "COVID-19 Counties"
+author: "Robert W. Walker @PieRatio; Data from @NYT Github"
+output: 
+  flexdashboard::flex_dashboard:
+    logo: https://github.com/robertwwalker/DADMStuff/raw/master/logo.png
+    orientation: rows
+    horizontal_layout: scroll
+    theme: readable
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+library(tigris); library(tidyverse); library(ggrepel); library(ggthemes); library(plotly)
+library(flexdashboard); library(magrittr); library(shiny); library(tidycensus); library(hrbrthemes); library(patchwork); library(leaflet)
+options(scipen=10)
+# Load the data.
+NYT.County <- read_csv(url("https://github.com/nytimes/covid-19-data/raw/master/us-counties.csv"))
+# Load the data for the map.
+counties.t <- counties(resolution = "500k", class="sf")
+# Create a fips code by concentenating the state and country codes.
+FC <- tigris::fips_codes %>% mutate(fips = paste0(state_code,county_code))
+# Create a vector of all fips codes.
+NYTfips <- names(table(NYT.County$fips))
+# Create a vector of all available dates.
+NYTDates <- names(table(NYT.County$date))
+# Prepare the data
+Base.Data <- 
+  expand.grid(fips = NYTfips, date=NYTDates, stringsAsFactors = FALSE) %>% # create a grid
+  mutate(date=as.Date(as.character(date))) %>%   # Turn the date into a proper date.
+  left_join(., FC) %>%  # join the fips codes to the grid
+  left_join(., NYT.County, by = c('fips' = 'fips', 'date' = 'date')) %>% # join the data to the fips/grid
+  mutate(cases = replace_na(cases, 0), deaths=replace_na(deaths,0)) %>% # replace NA with 0
+  ungroup()
+County.Data <- Base.Data %>%
+  group_by(fips) %>%  # group by county
+  arrange(date, .by_group = TRUE) %>% # sort by date
+  mutate(New.cases = cases - lag(cases, order_by = date),  # daily difference in cases
+         New.deaths = deaths - lag(deaths, order_by = date)) %>%   # daily difference in deaths from COVID-19
+  mutate(New.cases = replace_na(New.cases, 0),    # replace NA with 0
+         New.deaths = replace_na(New.deaths, 0)) %>%   # replace NA with 0
+  mutate(Max.cases = ifelse(is.na(New.cases), 0, cummax(New.cases)),   # Create a time series of current maximum: cases
+         Max.deaths = ifelse(is.na(New.deaths), 0, cummax(New.deaths))) %>%   # Create a time series of current maximum: deaths
+  mutate(MeanC = cummean(New.cases), MeanD = cummean(New.deaths),   # Cumulative average of cases
+         MidC = (MeanC/2) + (Max.cases/2), MidD = (MeanD/2) + (Max.deaths/2)) %>%  # Create a boundary for the gauges
+  mutate(NC7 = zoo::rollmean(New.cases, 7, align = "right", fill=0), ND7 = zoo::rollmean(New.deaths, 7, align = "right", fill=0)) %>%
+  ungroup()
+State.Data <- Base.Data %>%   # Same logic as above; I should've just created a function for this
+  group_by(state_name, date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths)) %>% ungroup() %>%
+  group_by(state_name) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(New.cases = cases - lag(cases, order_by = date), 
+         New.deaths = deaths - lag(deaths, order_by = date)) %>% 
+  mutate(New.cases = replace_na(New.cases, 0),  
+         New.deaths = replace_na(New.deaths, 0)) %>% 
+  mutate(Max.cases = ifelse(is.na(New.cases), 0, cummax(New.cases)), 
+         Max.deaths = ifelse(is.na(New.deaths), 0, cummax(New.deaths))) %>% 
+  mutate(MeanC = cummean(New.cases), MeanD = cummean(New.deaths), 
+         MidC = (MeanC/2) + (Max.cases/2), MidD = (MeanD/2) + (Max.deaths/2),
+         CFR = deaths / cases) %>%
+  mutate(NC7 = zoo::rollmean(New.cases, 7, align = "right", fill=0), ND7 = zoo::rollmean(New.deaths, 7, align = "right", fill=0)) %>%
+  ungroup()
+Merger <- merge(counties.t, County.Data, by.x = c('STATEFP','COUNTYFP'), by.y = c('state_code','county_code'))  # Merge data to map
+# Create the leaflet popup
+Merger %<>%  mutate(PopUp = popup_sb <- paste0("<strong>", NAMELSAD,     
+                   "</strong><br /> <strong>", state_name, 
+                   "</strong><br /> Cases: ", cases,
+                   "<br />New cases: ", New.cases,
+                   "<br />Max. New cases: ", Max.cases,
+                   "<br />Deaths: ", deaths,
+                   "<br />New deaths: ", New.deaths,
+                   "<br />Max. New deaths: ", Max.deaths))
+# Create the selector items for state
+State.Choice <- Merger %>% as.data.frame() %$% table(state_name) %>% data.frame()
+# Create the selector items for date
+Date.Choice <- Merger %>% as.data.frame() %$% table(date) %>% data.frame() %>% mutate(date = as.Date(as.character(date)))
+# Plot the time series of cases
+Plot.TS.Cases <- function(data, state) {
+  data %>% ggplot(., aes(x=date, y=cases)) + geom_line() + theme_ipsum_rc() + labs(x="Date", y="COVID-19 Cases", title=paste0("Cases: ",state))
+}
+# Plot the time series of deaths
+Plot.TS.Deaths <- function(data, state) {
+  data %>% ggplot(., aes(x=date, y=deaths)) + geom_line() + theme_ipsum_rc() + labs(x="Date", y="COVID-19 Deaths", title=paste0("Deaths: ",state))
+}
+# Plot the time series of new cases
+Plot.TS.NCases <- function(data, state) {
+  data %>% ggplot(., aes(x=date, y=New.cases)) + geom_line() + theme_ipsum_rc() + geom_line(aes(x=date, y=NC7), color="red") + labs(x="Date", y="COVID-19 New Cases", title=paste0("New Cases: ",state), caption = "7 Day Moving Average is Red")
+}
+# Plot the time series of new deaths
+Plot.TS.NDeaths <- function(data, state) {
+  data %>% ggplot(., aes(x=date, y=New.deaths)) + geom_line() + theme_ipsum_rc() + geom_line(aes(x=date, y=ND7), color="red") + labs(x="Date", y="COVID-19 New Deaths", title=paste0("New Deaths: ",state), caption = "7 Day Moving Average is Red")
+}
+# Plot the time series of CFR
+Plot.TS.CFR <- function(data, state) {
+  data %>% ggplot(., aes(x=date, y=CFR)) + geom_line() + theme_ipsum_rc() + labs(x="Date", y="COVID-19 CFR", title=paste0("CFR: ",state))
+}
+# Create a function to plot the leaflet for cases.  The death function is identical, just adjusted for labels and the like.
+Leaflet.FunctionC <- function(data, passer) {
+  data <- data
+  pal <- colorNumeric("viridis", domain=NULL)
+  data %>% sf::st_transform(crs = '+proj=longlat +datum=WGS84') %>%
+    leaflet(width = "100%") %>%
+    addProviderTiles(provider = "CartoDB.Positron") %>% 
+    addPolygons(stroke = TRUE, weight = 1, color = "#9E9B9B", opacity = 0.5,
+                smoothFactor = 0,
+                fillOpacity = 0.4,
+                fillColor = ~pal(cases),
+                popup = ~PopUp,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE)) %>%
+    addLegend("bottomright", 
+              pal = pal, 
+              values = passer,
+              title = "COVID-19 Cases",
+              opacity = 1)
+}
+# Leaflet function for deaths
+Leaflet.FunctionD <- function(data, passer) {
+  data <- data
+  pal <- colorNumeric("viridis", domain=NULL)
+  data %>% sf::st_transform(crs = '+proj=longlat +datum=WGS84') %>%
+    leaflet(width = "100%") %>%
+    addProviderTiles(provider = "CartoDB.Positron") %>% 
+    addPolygons(stroke = TRUE, weight=2, color = "#9E9B9B",
+                smoothFactor = 0,
+                fillOpacity = 0.4,
+                fillColor = ~pal(deaths),
+                popup = ~PopUp,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE)) %>%
+    addLegend("bottomright", 
+              pal = pal, 
+              values = passer,
+              title = "COVID-19 Deaths",
+              opacity = 0.4)
+}
+# Function to barplot the top 10 counties, given state, by cases
+Plot.Bar10C <- function(data, state) {
+  data  %>% 
+    top_n(10, cases) %>% 
+    ggplot(., aes(x=fct_reorder(county.x, cases), y=cases, fill=county.x, label=as.character(cases))) + geom_col() + geom_label(color="white") + scale_fill_viridis_d(option = "E") + guides(fill=FALSE) + coord_flip() + theme_ipsum() + 
+    labs(x="", y="COVID-19 Cases", title="Top 10: Cases")
+}
+# Function to barplot the top 10 counties, given state, by deaths
+Plot.Bar10D <- function(data, state) {
+  data  %>% 
+    top_n(10, deaths) %>% 
+    ggplot(., aes(x=fct_reorder(county.x, deaths), y=deaths, fill=county.x, label=as.character(deaths))) + geom_col() + geom_label(color="white") + scale_fill_viridis_d(option = "E") + guides(fill=FALSE) + coord_flip() + theme_ipsum() + 
+    labs(x="", y="COVID-19 Deaths", title="Top 10: Deaths")
+}
+# Function to barplot the top 10 counties, given state, by new cases
+Plot.Bar10NC <- function(data, state) {
+  data %>%  
+    filter(New.cases > 0) %>% 
+    top_n(10, New.cases) %>% 
+    ggplot(., aes(x=fct_reorder(county.x, New.cases), y=New.cases, fill=county.x, label=as.character(New.cases))) + 
+    geom_col() + 
+    geom_label(color="white") + 
+    scale_fill_viridis_d(option = "E") + 
+    guides(fill=FALSE) + 
+    coord_flip() + 
+    theme_ipsum() + 
+    labs(x="", y="COVID-19 Cases", title="Top 10: New Cases")
+}
+# Function to barplot the top 10 counties, given state, by new deaths
+Plot.Bar10ND <- function(data, state) {
+  data %>% 
+    filter(New.deaths > 0) %>% 
+    top_n(10, New.deaths) %>% ggplot(., aes(x=fct_reorder(county.x, New.deaths), y=New.deaths, fill=county.x, label=as.character(New.deaths))) + geom_col() + geom_label(color="white") + scale_fill_viridis_d(option = "E") + guides(fill=FALSE) + coord_flip() + theme_ipsum() + 
+    labs(x="", y="COVID-19 Deaths", title="Top 10: New Deaths")
+}
+```
+
+
+State
+======================================================================
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+# Create the shiny selectors from the states and dates.
+selectInput("state", "State selection:", choices = State.Choice$state_name, selected = State.Choice$state_name[[1]])
+selectInput("date", "Date selection:", choices = Date.Choice$date, selected = max(as.Date(Date.Choice$date)))
+```
+
+```{r}
+# Create county choices given state choice.
+County.choices <- reactive({
+  Merger %>% as.data.frame() %>% filter(state_name == input$state) %$% table(county.x) %>% data.frame() %>% select(county.x)
+})
+# Render the county selector
+output$CountyControl <- renderUI({
+  selectInput("CountyC", label="Choose a county", choices = County.choices()$county.x, selected = County.choices()$county.x[[1]])
+})
+# Construct a dataset for the Maps
+dataset <- reactive({
+  Merger %>% filter(state_name==input$state) %>% filter(date==input$date)
+})
+# Construct a dataset for state gauges and boxes
+dataset2 <- reactive({
+  State.Data %>% filter(state_name==input$state) %>% filter(date==input$date)
+})
+# Construct a dataset for state time series plots
+dataset3 <- reactive({
+  State.Data %>% filter(state_name==input$state)
+})
+# Create County Time series
+dataset5 <- reactive({
+  County.Data %>% filter(state_name==input$state & county.x==input$CountyC)
+})
+# Create a dataset for county gauges and boxes
+dataset4 <- reactive({
+  County.Data %>% filter(state_name==input$state & county.x==input$CountyC) %>% filter(date==input$date)
+})
+# Create a dataset for county gauges and boxes
+dataset6 <- reactive({
+  County.Data %>% filter(state_name==input$state) %>% filter(date==input$date)
+})
+# Extract the state choice
+output$result1 <- renderText({
+      paste("Chosen state:", input$state)
+    })
+# Extract the date choice
+output$result2 <- renderText({
+      paste("Chosen date:", input$date)
+})
+```
+
+Row
+-----------------------------------------------------------
+
+### Cases {.value-box}
+  
+```{r}
+renderValueBox({
+valueBox(value = prettyNum(dataset2()$cases, big.mark = ","), caption = "NYT: Cases", icon = "fa-thermometer-full", color = "#b3b3cc")
+})
+```
+
+### New Cases
+
+```{r}
+renderGauge({
+  gauge(dataset2()$New.cases, min = 0, max = dataset2()$Max.cases, gaugeSectors(success = c(0, dataset2()$MeanC), warning = c(dataset2()$MeanC, dataset2()$MidC), danger = c(dataset2()$MidC, dataset2()$Max.cases)))
+})
+```
+
+
+### Deaths {.value-box}
+
+```{r}
+renderValueBox({
+valueBox(value = prettyNum(dataset2()$deaths, big.mark = ","), caption = "NYT Deaths", color = "#b3b3cc", icon = "fa-h-square")
+})
+```
+
+### New Deaths
+
+```{r}
+renderGauge({
+  gauge(dataset2()$New.deaths, min = 0, max = dataset2()$Max.deaths, gaugeSectors(success = c(0, dataset2()$MeanD), warning = c(dataset2()$MeanD, dataset2()$MidD), danger = c(dataset2()$MidD, dataset2()$Max.deaths)))
+})
+```
+
+Row {.tabset .tabset-fade}
+----------------------------------------------------------------------------------
+
+### Cases
+
+```{r}
+renderLeaflet({
+Leaflet.FunctionC(dataset(), dataset()$cases)
+})
+```
+
+### Deaths
+
+```{r}
+renderLeaflet({
+Leaflet.FunctionD(dataset(), dataset()$deaths)
+})
+```
+
+
+Row {.tabset .tabset-fade}
+----------------------------------------------------------------------------------
+
+### Time Series
+
+```{r}
+renderPlot({
+p2 <- Plot.TS.Cases(dataset3(), state=input$state)
+p3 <- Plot.TS.Deaths(dataset3(), state=input$state)
+p4 <- Plot.TS.CFR(dataset3(), state=input$state)
+p5 <-  p2 + p3 + p4
+p5
+})
+```
+
+### Highest Total
+
+```{r}
+renderPlot({
+  p2B <- Plot.Bar10C(dataset6(), state=input$state)
+  p3B <- Plot.Bar10D(dataset6(), state=input$state)
+  p2B + p3B
+})
+```
+
+### Highest New Cases/Deaths
+
+```{r}
+renderPlot({
+  p2NB <- Plot.Bar10NC(dataset6(), state=input$state)
+  p3NB <- Plot.Bar10ND(dataset6(), state=input$state)
+  p4B <- p2NB + p3NB
+  p4B
+})
+```
+
+
+County
+===============================================================================
+
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+# selectInput("state", "State:", choices = State.Choice$state_name, selected = State.Choice$state_name[[1]])
+# selectInput("date", "Date:", choices = Date.Choice$date, selected = max(as.Date(Date.Choice$date)))
+textOutput("result1")
+textOutput("result2")
+uiOutput("CountyControl")
+```
+
+Outputs
+----------------------------------------------------------------------
+
+### Cases {.value-box}
+  
+```{r}
+renderValueBox({
+valueBox(value = prettyNum(dataset4()$cases, big.mark = ","), caption = "NYT: Cases", icon = "fa-thermometer-full", color = "#b3b3cc")
+})
+```
+
+### New Cases
+
+```{r}
+renderGauge({
+  gauge(dataset4()$New.cases, min = 0, max = dataset4()$Max.cases, gaugeSectors(success = c(0, dataset4()$MeanC), warning = c(dataset4()$MeanC, dataset4()$MidC), danger = c(dataset4()$MidC, dataset4()$Max.cases)))
+})
+```
+
+
+### Deaths {.value-box}
+
+```{r}
+renderValueBox({
+valueBox(value = prettyNum(dataset4()$deaths, big.mark = ","), caption = "NYT Deaths", color = "#b3b3cc", icon = "fa-h-square")
+})
+```
+
+### New Deaths
+
+```{r}
+renderGauge({
+  gauge(dataset4()$New.deaths, min = 0, max = dataset4()$Max.deaths, gaugeSectors(success = c(0, dataset4()$MeanD), warning = c(dataset4()$MeanD, dataset4()$MidD), danger = c(dataset4()$MidD, dataset4()$Max.deaths)))
+})
+```
+
+
+
+Row {.tabset .tabset-fade}
+----------------------------------------------------------------------------------
+
+### Cases
+
+```{r}
+renderLeaflet({
+Leaflet.FunctionC(dataset(), dataset()$cases)
+})
+```
+
+### Deaths
+
+```{r}
+renderLeaflet({
+Leaflet.FunctionD(dataset(), dataset()$deaths)
+})
+```
+
+Row
+----------------------------------------------------------------------------------
+```{r}
+renderPlot({
+p2 <- Plot.TS.Cases(dataset5(), state=input$CountyC)
+p3 <- Plot.TS.Deaths(dataset5(), state=input$CountyC)
+p4 <- Plot.TS.NCases(dataset5(), state=input$CountyC)
+p5 <- Plot.TS.NDeaths(dataset5(), state=input$CountyC)
+p6 <-  (p4 + p5) / (p2 + p3)
+p6
+})
+```
+
