@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y \
  
 # install R packages required 
 # (change it depending on the packages you need)
-RUN R -e "install.packages(c('tidyverse','knitr',plotly','hrbrthemes','ggthemes','lubridate','magrittr'), repos='http://cran.rstudio.com/')"
+RUN R -e "install.packages(c('bslib','tidyverse','knitr',plotly','hrbrthemes','thematic','lubridate','magrittr'), repos='http://cran.rstudio.com/')"
 # Copy configuration files into the Docker image
 # COPY shiny-server.conf  /etc/shiny-server/shiny-server.conf
 # COPY /app/index.Rmd /srv/shiny-server/

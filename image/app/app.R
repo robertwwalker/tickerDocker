@@ -2,9 +2,10 @@ library(shiny)
 library(tidyverse)
 library(tidyquant)
 library(plotly)
-
+library(bslib)
+library(thematic)
 # Define UI for dataset viewer app ----
-ui <- fluidPage(
+ui <- fluidPage(theme = bs_theme(version = 5, bootswatch = "superhero"),
   
   # App title ----
   titlePanel("Tickers and Beta"),
@@ -38,6 +39,7 @@ ui <- fluidPage(
 
 # Define server logic to summarize and view selected dataset ----
 server <- function(input, output) {
+  thematic::thematic_shiny()
   # Create caption ----
   # The output$caption is computed based on a reactive expression
   # that returns input$caption. When the user changes the
